@@ -110,6 +110,7 @@ python3 filenamer.py plan ROOT --scan SCAN_DIR --out-plan plan.json --out-csv pr
 
 **Overrides** (`overrides.tsv`, tab-separated `old_path<TAB>new_base_or_ACTION<TAB>note`) let a person or an
 agent that looked at the `needs_visual` items supply names: `ss_some-better-name`, `TO_DELETE<TAB>reason`, or `KEEP`.
+An override wins over automatic duplicate/junk flags.
 
 ### Capture sessions (`--sessions sessions.json`)
 When you take a burst of screenshots on purpose (ad inspiration, a bug repro, a competitor teardown), declare the
@@ -143,8 +144,10 @@ files. Each look costs time (and, for an AI agent, credits): agree on a batch si
 python3 filenamer.py apply plan.json [--dry-run] [--only rename|to_delete|sensitive] [--log-dir DIR]
 ```
 Moves `rename`, `to_delete` and `sensitive` items with `mv -n`; checks that the source exists and the destination
-does not, and verifies afterwards. Every successful move is appended to `<log-dir>/rename-log.csv`
-(`old_path,new_path`; default `ROOT/_to-delete/`). To revert, move each `new_path` back to `old_path`.
+does not, and verifies afterwards. Every successful move is appended to a `rename-log.csv` (`old_path,new_path`)
+in the `_to-delete/` of the layout folder it landed in (e.g. `screenshots/_to-delete/rename-log.csv`; anything
+outside the layout folders logs to `ROOT/_to-delete/`), or to `--log-dir DIR` if given. To revert, move each
+`new_path` back to `old_path`.
 
 ## Typical run
 ```

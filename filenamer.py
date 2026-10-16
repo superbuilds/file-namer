@@ -525,6 +525,11 @@ def cmd_plan(a):
                     small.update(action="to_delete", confidence="near_dup",
                                  reason=f"near-duplicate: {inter/len(ts):.0%} of text in {big['name']}")
                     break
+    # a manual override (new name or KEEP) wins over automatic dup/junk flagging
+    for it in items.values():
+        ov = overrides.get(it["path"])
+        if ov and ov[0].upper() != "TO_DELETE" and it["action"] == "to_delete" and not it.get("private"):
+            it.update(action="keep", reason="", confidence=None)
     # names
     for it in items.values():
         if it["action"] != "keep": continue
@@ -599,13 +604,21 @@ def cmd_plan(a):
         if it["action"] == "rename":
             d = dest_dir(it); ext = ("." + it["ext"]) if it["ext"] and it["ext"] != "app" else (".app" if it["app_bundle"] else "")
             b = it["proposed_base"]; n = 2
-            while os.path.join(d, (b + ext).lower()) in taken: b = f'{it["proposed_base"]}-{n}'; n += 1
+            while (os.path.join(d, (b + ext).lower()) in taken or os.path.lexists(os.path.join(d, b + ext))) \
+                    and os.path.join(d, b + ext) != it["path"]:  # also files on disk the scan did not cover
+                b = f'{it["proposed_base"]}-{n}'; n += 1
             taken.add(os.path.join(d, (b + ext).lower()))
             it["new_path"] = os.path.join(d, b + ext)
         elif it["action"] in ("to_delete", "sensitive"):
             sub = "_to-delete" if it["action"] == "to_delete" else "_sensitive"
             d = os.path.join(dest_dir(it) if a.layout == "categorize" and it["depth"] == 0 else os.path.dirname(it["path"]), sub)
-            it["new_path"] = os.path.join(d, it["name"])
+            stem, dot, ext = it["name"].rpartition(".")
+            if not dot: stem, ext = it["name"], ""
+            cand, n = it["name"], 2
+            while os.path.join(d, cand.lower()) in taken or os.path.lexists(os.path.join(d, cand)):
+                cand = f"{stem}-{n}" + (f".{ext}" if dot else ""); n += 1
+            taken.add(os.path.join(d, cand.lower()))
+            it["new_path"] = os.path.join(d, cand)
         else:
             it["new_path"] = None
     from collections import Counter
@@ -643,19 +656,38 @@ def summarize(plan):
     print(f"private (excluded, count only): {pv.get('files', 0)} files, {pv.get('bytes', 0)/1e9:.2f} GB, by rule {pv.get('by_rule', {})}")
 
 # ---------------------------------------------------------------- apply
+LAYOUT_DIRS = ("screenshots", "videos", "images", "docs", "audio", "archives", "installers", "other")
+
+def apply_log_dir(a, root, dst):
+    """--log-dir if given; else the _to-delete of the layout folder the file lands in (e.g. screenshots/_to-delete);
+    else <root>/_to-delete."""
+    if a.log_dir:
+        return a.log_dir
+    rel = os.path.relpath(dst, root)
+    first = rel.split(os.sep)[0]
+    if not rel.startswith("..") and first in LAYOUT_DIRS:
+        return os.path.join(root, first, "_to-delete")
+    return os.path.join(root, "_to-delete")
+
 def cmd_apply(a):
     plan = json.load(open(a.plan, encoding="utf-8"))
     root = plan["root"]
-    log_dir = a.log_dir or os.path.join(root, "_to-delete")
-    log_p = os.path.join(log_dir, "rename-log.csv")
-    if not a.dry_run:
-        os.makedirs(log_dir, exist_ok=True)
-    new_log = not os.path.exists(log_p)
     rules = PrivacyRules(root)  # ignore.txt + .donotread + private-folders.txt
     ok = err = skipped = 0
-    with (open(os.devnull, "w") if a.dry_run else open(log_p, "a", newline="", encoding="utf-8")) as fh:
-        w = csv.writer(fh)
-        if new_log: w.writerow(["old_path", "new_path"])
+    logs = {}  # log path -> (file handle, writer)
+
+    def log_move(src, dst):
+        lp = os.path.join(apply_log_dir(a, root, dst), "rename-log.csv")
+        if lp not in logs:
+            os.makedirs(os.path.dirname(lp), exist_ok=True)
+            new_log = not os.path.exists(lp)
+            fh = open(lp, "a", newline="", encoding="utf-8"); wr = csv.writer(fh)
+            if new_log: wr.writerow(["old_path", "new_path"])
+            logs[lp] = (fh, wr)
+        fh, wr = logs[lp]
+        wr.writerow([src, dst]); fh.flush()
+
+    try:
         for it in plan["items"]:
             if it["action"] not in ("rename", "to_delete", "sensitive") or not it.get("new_path"):
                 skipped += 1; continue
@@ -669,14 +701,17 @@ def cmd_apply(a):
             if os.path.lexists(dst):
                 log("EXISTS", dst); err += 1; continue
             if a.dry_run:
-                print(f"would mv -n {src!r} -> {dst!r}"); ok += 1; continue
+                print(f"would mv -n {src!r} -> {dst!r}  (log: {apply_log_dir(a, root, dst)})"); ok += 1; continue
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             r = subprocess.run(["mv", "-n", src, dst])
             if r.returncode == 0 and os.path.lexists(dst) and not os.path.lexists(src):
-                w.writerow([src, dst]); fh.flush(); ok += 1
+                log_move(src, dst); ok += 1
             else:
                 log("FAIL", src); err += 1
-    print(f"moved={ok} errors={err} skipped={skipped} log={log_p}")
+    finally:
+        for fh, _ in logs.values():
+            fh.close()
+    print(f"moved={ok} errors={err} skipped={skipped} logs={', '.join(logs) or '(none)'}")
 
 # ---------------------------------------------------------------- init
 def cmd_init(a):
